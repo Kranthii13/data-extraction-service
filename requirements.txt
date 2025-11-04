@@ -1,0 +1,22 @@
+# Data Extraction Service - Production Grade
+fastapi
+uvicorn[standard]
+pydantic
+PyMuPDF
+python-docx
+pytesseract
+Pillow
+sqlalchemy
+psycopg2-binary
+python-dotenv
+python-multipart
+
+# Production scaling and analytics
+celery
+redis
+openpyxl
+
+# Enhanced data processing
+pandas
+numpy
+beautifulsoup4

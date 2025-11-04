@@ -1,0 +1,13 @@
+services:
+  app:
+    build: .
+    container_name: extraction_service
+    env_file:
+      - .env
+    ports:
+      - "${APP_HOST_PORT:-8000}:8000"
+    volumes:
+      - ./src:/app/src
+      - .:/app/test_files  # Mount current directory for test files
+    extra_hosts:
+      - "host.docker.internal:host-gateway"  # Enable host.docker.internal on all platforms
