@@ -1,5 +1,6 @@
 # src/application/services.py
-from src.core.models import Document, ExtractedData
+from src.core.models import Document, ExtractedData, DocumentTable
+from typing import List
 from src.core.ports import IDocumentParser
 from src.core.repositories import IDocumentRepository
 from src.services.ports import IExtractionService
@@ -63,9 +64,12 @@ class ExtractionService(IExtractionService):
                     logger.info(f"Extracting tables from {doc.filename} ({file_ext})")
                     raw_tables = parser.extract_tables(doc.content)
                     
+                    # Apply size limits to prevent browser crashes (for all document types)
+                    limited_tables = self._limit_table_sizes(raw_tables)
+                    
                     # Convert tables to simple dictionaries to avoid validation issues
                     tables = []
-                    for table in raw_tables:
+                    for table in limited_tables:
                         if table.row_count > 0 and table.column_count > 0:
                             # Create a simple dictionary representation
                             table_dict = {
@@ -80,13 +84,18 @@ class ExtractionService(IExtractionService):
                                 "context_after": table.context_after,
                                 "table_type": table.table_type,
                                 "confidence_score": table.confidence_score,
-                                "extraction_method": table.extraction_method
+                                "extraction_method": table.extraction_method,
+                                # Add truncation metadata for all document types
+                                "is_truncated": getattr(table, 'is_truncated', False),
+                                "original_row_count": getattr(table, 'original_row_count', table.row_count),
+                                "stored_row_count": getattr(table, 'stored_row_count', table.row_count),
+                                "truncation_reason": getattr(table, 'truncation_reason', None)
                             }
                             tables.append(table_dict)
                         else:
                             logger.debug(f"Skipping empty table: {table.table_index}")
                     
-                    logger.info(f"Found {len(tables)} valid tables in {doc.filename}")
+                    logger.info(f"Found {len(tables)} valid tables in {doc.filename} (size limits applied to prevent browser crashes)")
                 else:
                     tables = []  # Skip table extraction for large files or unsupported types
                     logger.debug(f"Skipping table extraction for {doc.filename}: file_ext={file_ext}, size={len(doc.content)}")
@@ -102,7 +111,7 @@ class ExtractionService(IExtractionService):
             extracted_data = ExtractedData(
                 full_text=sanitized_text,
                 page_count=page_count,
-                has_ocr_content=used_ocr,
+                has_ocr_content=1 if used_ocr else 0,  # Convert boolean to integer
                 processing_method=processing_method,
                 tables=[],  # We'll store tables as raw data in the database
                 table_count=len(tables)
@@ -133,7 +142,7 @@ class ExtractionService(IExtractionService):
             return ExtractedData(
                 full_text=f"Error processing document: {str(e)}",
                 page_count=1,
-                has_ocr_content=False,
+                has_ocr_content=0,  # Convert boolean False to integer 0
                 processing_method="error",
                 tables=[],
                 table_count=0
@@ -155,6 +164,51 @@ class ExtractionService(IExtractionService):
             sanitized = sanitized[:max_length] + "\n[Text truncated]"
         
         return sanitized
+    
+    def _limit_table_sizes(self, tables: List[DocumentTable]) -> List[DocumentTable]:
+        """
+        Apply size limits to all tables to prevent browser crashes.
+        Works for tables from any document type (PDF, DOCX, HTML, etc.)
+        """
+        from src.config.app_config import config
+        
+        if not tables:
+            return tables
+        
+        limited_tables = []
+        max_rows = config.large_file.max_storage_rows
+        
+        for table in tables:
+            # Create a copy of the table to avoid modifying the original
+            table_dict = table.dict()
+            
+            # Limit the rows if they exist and are too large
+            if table_dict.get('rows') and len(table_dict['rows']) > max_rows:
+                original_count = len(table_dict['rows'])
+                table_dict['rows'] = table_dict['rows'][:max_rows]
+                
+                # Add truncation metadata
+                table_dict['is_truncated'] = True
+                table_dict['original_row_count'] = original_count
+                table_dict['stored_row_count'] = len(table_dict['rows'])
+                table_dict['truncation_reason'] = 'Large table truncated to prevent browser crashes'
+                
+                logger.warning(f"Table {table.table_index} truncated: {original_count} → {max_rows} rows")
+            else:
+                table_dict['is_truncated'] = False
+                table_dict['original_row_count'] = len(table_dict.get('rows', []))
+                table_dict['stored_row_count'] = len(table_dict.get('rows', []))
+            
+            # Create new DocumentTable with limited data
+            try:
+                limited_table = DocumentTable(**table_dict)
+                limited_tables.append(limited_table)
+            except Exception as e:
+                logger.error(f"Failed to create limited table: {e}")
+                # If creation fails, use original table
+                limited_tables.append(table)
+        
+        return limited_tables
     
     def _detect_file_type(self, filename: str, content: bytes) -> str:
         """

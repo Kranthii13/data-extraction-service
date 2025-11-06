@@ -6,12 +6,44 @@ import os
 import uuid
 import json
 import logging
+import time
 from datetime import datetime
 from enum import Enum
 
 from src.core.models import Document, ExtractedData
 from src.services.ports import IExtractionService
 from src.adapters.dependencies import get_extraction_service, get_db
+from src.config.app_config import config
+
+def _limit_table_rows(table_rows: List[List[str]], max_rows: int = None) -> tuple[List[List[str]], dict]:
+    """
+    Limit table rows to prevent browser crashes and return metadata about truncation.
+    
+    Returns:
+        tuple: (limited_rows, metadata)
+    """
+    if max_rows is None:
+        max_rows = config.large_file.max_storage_rows
+    
+    if not table_rows or len(table_rows) <= max_rows:
+        return table_rows, {
+            'is_truncated': False,
+            'original_row_count': len(table_rows) if table_rows else 0,
+            'stored_row_count': len(table_rows) if table_rows else 0
+        }
+    
+    # Truncate rows
+    limited_rows = table_rows[:max_rows]
+    metadata = {
+        'is_truncated': True,
+        'original_row_count': len(table_rows),
+        'stored_row_count': len(limited_rows),
+        'truncation_reason': 'Large table truncated to prevent browser crashes'
+    }
+    
+    logger.warning(f"Large table detected ({len(table_rows)} rows). Truncated to {max_rows} rows to prevent memory issues.")
+    
+    return limited_rows, metadata
 
 logger = logging.getLogger(__name__)
 
@@ -41,24 +73,93 @@ try:
     def process_document_task(document_data: dict) -> dict:
         """Celery task for document processing."""
         import base64
+        import time
+        import hashlib
         from src.core.models import Document
         from src.adapters.dependencies import get_extraction_service, SessionLocal
+        from src.services.tabular_processor import TabularProcessor
+        from src.adapters.database.models import DocumentRecord
         
         content = base64.b64decode(document_data['content'])
         document = Document(content=content, filename=document_data['filename'])
         
         db = SessionLocal()
         try:
-            service = get_extraction_service(db)
-            result = service.extract_from_document(document)
-            return {
-                'id': getattr(result, 'id', None),
-                'filename': document_data['filename'],
-                'page_count': result.page_count,
-                'processing_method': result.processing_method,
-                'has_ocr_content': result.has_ocr_content,
-                'text_preview': result.full_text[:200] + "..." if len(result.full_text) > 200 else result.full_text
-            }
+            # Check if this is a tabular file and handle as table
+            if _is_tabular_file(document.filename, content):
+                # Process as tabular data
+                start_time = time.time()
+                
+                # Detect file type
+                file_type = TabularProcessor.detect_file_type(document.filename, content)
+                if not file_type:
+                    raise ValueError("Unable to detect tabular file type")
+                
+                # Load as DataFrame
+                df = TabularProcessor.load_dataframe(content, file_type, document.filename)
+                
+                # Create table data structure
+                table_data = TabularProcessor.create_table_data(df, file_type, document.filename)
+                
+                # Store in database
+                file_hash = hashlib.sha256(content).hexdigest()
+                
+                # Check for existing document
+                existing_doc = db.query(DocumentRecord).filter(DocumentRecord.file_hash == file_hash).first()
+                if existing_doc:
+                    document_id = existing_doc.id
+                    action = "duplicate"
+                else:
+                    # Create new document record
+                    db_document = DocumentRecord(
+                        filename=document.filename,
+                        file_extension=f".{file_type}",
+                        file_size=len(content),
+                        file_hash=file_hash,
+                        full_text="",  # Tabular files don't have full text
+                        page_count=1,
+                        word_count=len(df) * len(df.columns),
+                        processing_method=f"tabular_{file_type}",
+                        has_ocr_content=0,  # Convert boolean False to integer 0
+                        tables_data=table_data,
+                        table_count=1
+                    )
+                    
+                    db.add(db_document)
+                    db.commit()
+                    db.refresh(db_document)
+                    document_id = db_document.id
+                    action = "created"
+                
+                processing_time = int((time.time() - start_time) * 1000)
+                
+                return {
+                    "id": document_id,
+                    "filename": document.filename,
+                    "action": action,
+                    "processing_time_ms": processing_time,
+                    "file_size_bytes": len(content),
+                    "data_format": "table",
+                    "table_preview": TabularProcessor.get_preview_data(df),
+                    "table_info": {
+                        "shape": f"{len(df)} rows × {len(df.columns)} columns",
+                        "columns": list(df.columns),
+                        "data_types": {col: str(df[col].dtype) for col in df.columns}
+                    },
+                    "data_quality": TabularProcessor.analyze_data_quality(df)
+                }
+            else:
+                # Regular document processing
+                service = get_extraction_service(db)
+                result = service.extract_from_document(document)
+                return {
+                    'id': getattr(result, 'id', None),
+                    'filename': document_data['filename'],
+                    'page_count': result.page_count,
+                    'processing_method': result.processing_method,
+                    'has_ocr_content': result.has_ocr_content,
+                    'text_preview': result.full_text[:200] + "..." if len(result.full_text) > 200 else result.full_text
+                }
         finally:
             db.close()
     
@@ -114,20 +215,93 @@ async def process_document_background(task_id: str, document: Document, db: Sess
     try:
         update_task_status(task_id, {"status": TaskStatus.PROCESSING})
         
-        service = get_extraction_service(db)
-        result = service.extract_from_document(document)
-        
-        update_task_status(task_id, {
-            "status": TaskStatus.COMPLETED,
-            "result": {
-                "id": getattr(result, 'id', None),
-                "filename": document.filename,
-                "page_count": result.page_count,
-                "processing_method": result.processing_method,
-                "has_ocr_content": result.has_ocr_content,
-                "text_preview": result.full_text[:200] + "..." if len(result.full_text) > 200 else result.full_text
-            }
-        })
+        # Check if this is a tabular file and handle as table
+        if _is_tabular_file(document.filename, document.content):
+            # Process as tabular data
+            import time
+            from src.services.tabular_processor import TabularProcessor
+            import hashlib
+            from src.adapters.database.models import DocumentRecord
+            
+            start_time = time.time()
+            
+            # Detect file type
+            file_type = TabularProcessor.detect_file_type(document.filename, document.content)
+            if not file_type:
+                raise ValueError("Unable to detect tabular file type")
+            
+            # Load as DataFrame
+            df = TabularProcessor.load_dataframe(document.content, file_type, document.filename)
+            
+            # Create table data structure
+            table_data = TabularProcessor.create_table_data(df, file_type, document.filename)
+            
+            # Store in database
+            file_hash = hashlib.sha256(document.content).hexdigest()
+            
+            # Check for existing document
+            existing_doc = db.query(DocumentRecord).filter(DocumentRecord.file_hash == file_hash).first()
+            if existing_doc:
+                document_id = existing_doc.id
+                action = "duplicate"
+            else:
+                # Create new document record
+                db_document = DocumentRecord(
+                    filename=document.filename,
+                    file_extension=f".{file_type}",
+                    file_size=len(document.content),
+                    file_hash=file_hash,
+                    full_text="",  # Tabular files don't have full text
+                    page_count=1,
+                    word_count=len(df) * len(df.columns),
+                    processing_method=f"tabular_{file_type}",
+                    has_ocr_content=0,  # Convert boolean False to integer 0
+                    tables_data=table_data,
+                    table_count=1
+                )
+                
+                db.add(db_document)
+                db.commit()
+                db.refresh(db_document)
+                document_id = db_document.id
+                action = "created"
+            
+            processing_time = int((time.time() - start_time) * 1000)
+            
+            update_task_status(task_id, {
+                "status": TaskStatus.COMPLETED,
+                "result": {
+                    "id": document_id,
+                    "filename": document.filename,
+                    "action": action,
+                    "processing_time_ms": processing_time,
+                    "file_size_bytes": len(document.content),
+                    "data_format": "table",
+                    "table_preview": TabularProcessor.get_preview_data(df),
+                    "table_info": {
+                        "shape": f"{len(df)} rows × {len(df.columns)} columns",
+                        "columns": list(df.columns),
+                        "data_types": {col: str(df[col].dtype) for col in df.columns}
+                    },
+                    "data_quality": TabularProcessor.analyze_data_quality(df)
+                }
+            })
+        else:
+            # Regular document processing
+            service = get_extraction_service(db)
+            result = service.extract_from_document(document)
+            
+            update_task_status(task_id, {
+                "status": TaskStatus.COMPLETED,
+                "result": {
+                    "id": getattr(result, 'id', None),
+                    "filename": document.filename,
+                    "page_count": result.page_count,
+                    "processing_method": result.processing_method,
+                    "has_ocr_content": result.has_ocr_content,
+                    "text_preview": result.full_text[:200] + "..." if len(result.full_text) > 200 else result.full_text
+                }
+            })
         
     except Exception as e:
         logger.error(f"Background processing failed: {e}")
@@ -139,11 +313,17 @@ async def process_document_background(task_id: str, document: Document, db: Sess
 # API Endpoints
 @app.post("/extract/")
 async def extract_sync(file: UploadFile = File(...), db: Session = Depends(get_db)):
-    """Process document synchronously with performance tracking."""
+    """Process document synchronously with performance tracking and CSV table handling."""
     import time
     start_time = time.time()
     
     content = await file.read()
+    
+    # Check if this is a tabular file and handle as table
+    if _is_tabular_file(file.filename, content):
+        return await _process_tabular_as_table(file, content, start_time, db)
+    
+    # Regular document processing
     document = Document(content=content, filename=file.filename)
     
     service = get_extraction_service(db)
@@ -162,10 +342,27 @@ async def extract_sync(file: UploadFile = File(...), db: Session = Depends(get_d
     # Calculate processing time
     processing_time = round((time.time() - start_time) * 1000)  # milliseconds
     
-    # Convert tables to serializable format
+    # Convert tables to serializable format with size limits for ALL document types
     tables_data = []
     if result.tables:
         for table in result.tables:
+            # Apply response size limits to prevent browser crashes
+            limited_rows = table.rows
+            response_truncated = False
+            
+            if table.rows and len(table.rows) > config.large_file.max_response_rows:
+                limited_rows = table.rows[:config.large_file.max_response_rows]
+                response_truncated = True
+                logger.info(f"Sync response truncated: showing {config.large_file.max_response_rows} of {len(table.rows)} rows for table {table.table_index}")
+            
+            # Create semantic data format from headers and limited rows
+            data_records = []
+            if table.headers and limited_rows:
+                for row in limited_rows:
+                    if len(row) == len(table.headers):
+                        record = {header: (value if value is not None else None) for header, value in zip(table.headers, row)}
+                        data_records.append(record)
+            
             table_dict = {
                 "table_index": table.table_index,
                 "page_number": table.page_number,
@@ -173,13 +370,22 @@ async def extract_sync(file: UploadFile = File(...), db: Session = Depends(get_d
                 "context_before": table.context_before,
                 "context_after": table.context_after,
                 "section_heading": table.section_heading,
-                "headers": table.headers,
-                "rows": table.rows,
+                "headers": table.headers,  # Include headers for compatibility
+                "data": data_records,  # Key-value format with size limits
                 "row_count": table.row_count,
                 "column_count": table.column_count,
                 "table_type": table.table_type,
                 "confidence_score": table.confidence_score,
-                "extraction_method": table.extraction_method
+                "extraction_method": table.extraction_method,
+                # Add response truncation metadata
+                "response_truncated": response_truncated,
+                "response_sample_size": len(data_records),
+                "total_rows_available": table.row_count,
+                # Include storage truncation info if available
+                "storage_truncated": getattr(table, 'is_truncated', False),
+                "storage_truncation_reason": getattr(table, 'truncation_reason', None),
+                "original_row_count": getattr(table, 'original_row_count', table.row_count),
+                "stored_row_count": getattr(table, 'stored_row_count', table.row_count)
             }
             tables_data.append(table_dict)
     
@@ -262,14 +468,44 @@ async def get_status(task_id: str):
     
     return status
 
-@app.get("/documents/{document_id}", response_model=ExtractedData)
+@app.get("/documents/{document_id}")
 async def get_document(document_id: int, db: Session = Depends(get_db)):
-    """Get document by ID."""
+    """Get document by ID with limited table data to prevent browser crashes."""
     service = get_extraction_service(db)
     document = service.get_document_by_id(document_id)
     if not document:
         raise HTTPException(status_code=404, detail="Document not found")
-    return document
+    
+    # Convert to dict and limit table data for response
+    doc_dict = document.dict()
+    
+    # Limit table data to prevent browser crashes (applies to all document types)
+    if doc_dict.get('tables'):
+        limited_tables = []
+        for table in doc_dict['tables']:
+            # Limit rows to prevent browser crashes for ALL document types
+            if table.get('rows') and len(table['rows']) > config.large_file.max_response_rows:
+                original_rows = len(table['rows'])
+                table['rows'] = table['rows'][:config.large_file.max_response_rows]
+                table['response_truncated'] = True
+                table['response_sample_size'] = config.large_file.max_response_rows
+                table['total_rows_available'] = table.get('original_row_count', original_rows)
+                logger.info(f"API response truncated: showing {config.large_file.max_response_rows} of {original_rows} rows for table {table.get('table_index', 'unknown')}")
+            else:
+                table['response_truncated'] = False
+                table['response_sample_size'] = len(table.get('rows', []))
+            
+            # Include storage truncation info if available
+            if table.get('is_truncated'):
+                table['storage_truncated'] = True
+                table['storage_truncation_reason'] = table.get('truncation_reason')
+            else:
+                table['storage_truncated'] = False
+                
+            limited_tables.append(table)
+        doc_dict['tables'] = limited_tables
+    
+    return doc_dict
 
 @app.get("/documents/", response_model=List[ExtractedData])
 async def get_documents(
@@ -331,9 +567,11 @@ async def get_document_table(
     document_id: int, 
     table_index: int, 
     format: str = Query("json", regex="^(json|html|markdown|context)$"),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(100, ge=1, le=1000),
     db: Session = Depends(get_db)
 ):
-    """Get a specific table from a document with contextual information."""
+    """Get a specific table from a document with pagination to prevent browser crashes."""
     from src.adapters.database.models import DocumentRecord
     
     # Get document with tables
@@ -351,11 +589,50 @@ async def get_document_table(
     if not table_data:
         raise HTTPException(status_code=404, detail="Table not found")
     
+    # Apply pagination to prevent browser crashes
+    def paginate_data(data_list, page_num, size):
+        if not data_list:
+            return []
+        start_idx = (page_num - 1) * size
+        end_idx = start_idx + size
+        return data_list[start_idx:end_idx]
+    
     if format == "html":
         return {"table_html": table_data.get("table_html")}
     elif format == "markdown":
         return {"table_markdown": table_data.get("table_markdown")}
     elif format == "context":
+        # For context, limit the data to prevent crashes (works for all document types)
+        rows = table_data.get("rows", [])
+        data = table_data.get("data", [])
+        
+        # Use data field if available (for CSV files and new format), otherwise use rows (for PDF/DOCX/HTML)
+        if data and len(data) > 0:
+            paginated_data = paginate_data(data, page, page_size)
+            total_rows = len(data)
+            data_format = "key_value"  # Modern format
+        elif rows and len(rows) > 0:
+            # Convert rows to key-value format for consistency across all document types
+            headers = table_data.get("headers", [])
+            if headers:
+                rows_as_records = []
+                for row in rows:
+                    if len(row) == len(headers):
+                        record = {header: (value if value is not None else None) for header, value in zip(headers, row)}
+                        rows_as_records.append(record)
+                paginated_data = paginate_data(rows_as_records, page, page_size)
+                total_rows = len(rows_as_records)
+                data_format = "converted_rows"
+            else:
+                # Fallback to raw rows if no headers
+                paginated_data = paginate_data(rows, page, page_size)
+                total_rows = len(rows)
+                data_format = "raw_rows"
+        else:
+            paginated_data = []
+            total_rows = 0
+            data_format = "empty"
+        
         return {
             "table_index": table_data.get("table_index"),
             "page_number": table_data.get("page_number"),
@@ -366,18 +643,81 @@ async def get_document_table(
             "table_type": table_data.get("table_type"),
             "confidence_score": table_data.get("confidence_score"),
             "headers": table_data.get("headers"),
-            "rows": table_data.get("rows"),
+            "data": paginated_data,  # Use paginated data
             "row_count": table_data.get("row_count"),
-            "column_count": table_data.get("column_count")
+            "column_count": table_data.get("column_count"),
+            "pagination": {
+                "page": page,
+                "page_size": page_size,
+                "total_rows": total_rows,
+                "total_pages": (total_rows + page_size - 1) // page_size if total_rows > 0 else 0,
+                "has_next": page * page_size < total_rows,
+                "has_prev": page > 1
+            },
+            "data_format": data_format,
+            "supports_all_document_types": True,  # Works for PDF, DOCX, HTML, CSV, etc.
+            "truncation_info": {
+                "storage_truncated": table_data.get("is_truncated", False),
+                "storage_reason": table_data.get("truncation_reason"),
+                "original_row_count": table_data.get("original_row_count"),
+                "stored_row_count": table_data.get("stored_row_count")
+            }
         }
     else:  # json (basic)
+        # For basic JSON, also apply pagination (works for all document types)
+        rows = table_data.get("rows", [])
+        data = table_data.get("data", [])
+        
+        # Use data field if available (for CSV files and new format), otherwise use rows (for PDF/DOCX/HTML)
+        if data and len(data) > 0:
+            paginated_data = paginate_data(data, page, page_size)
+            total_rows = len(data)
+            data_format = "key_value"  # Modern format
+        elif rows and len(rows) > 0:
+            # Convert rows to key-value format for consistency across all document types
+            headers = table_data.get("headers", [])
+            if headers:
+                rows_as_records = []
+                for row in rows:
+                    if len(row) == len(headers):
+                        record = {header: (value if value is not None else None) for header, value in zip(headers, row)}
+                        rows_as_records.append(record)
+                paginated_data = paginate_data(rows_as_records, page, page_size)
+                total_rows = len(rows_as_records)
+                data_format = "converted_rows"
+            else:
+                # Fallback to raw rows if no headers
+                paginated_data = paginate_data(rows, page, page_size)
+                total_rows = len(rows)
+                data_format = "raw_rows"
+        else:
+            paginated_data = []
+            total_rows = 0
+            data_format = "empty"
+        
         return {
             "table_index": table_data.get("table_index"),
             "page_number": table_data.get("page_number"),
             "headers": table_data.get("headers"),
-            "rows": table_data.get("rows"),
+            "data": paginated_data,  # Use paginated data instead of full rows
             "row_count": table_data.get("row_count"),
-            "column_count": table_data.get("column_count")
+            "column_count": table_data.get("column_count"),
+            "pagination": {
+                "page": page,
+                "page_size": page_size,
+                "total_rows": total_rows,
+                "total_pages": (total_rows + page_size - 1) // page_size if total_rows > 0 else 0,
+                "has_next": page * page_size < total_rows,
+                "has_prev": page > 1
+            },
+            "data_format": data_format,
+            "supports_all_document_types": True,  # Works for PDF, DOCX, HTML, CSV, etc.
+            "truncation_info": {
+                "storage_truncated": table_data.get("is_truncated", False),
+                "storage_reason": table_data.get("truncation_reason"),
+                "original_row_count": table_data.get("original_row_count"),
+                "stored_row_count": table_data.get("stored_row_count")
+            }
         }
 
 @app.get("/tables/search")
@@ -431,100 +771,9 @@ async def search_tables(
 
 
 
-@app.get("/tables/by-type/{table_type}")
-async def get_tables_by_type(
-    table_type: str,
-    limit: int = Query(100, ge=1, le=1000),
-    db: Session = Depends(get_db)
-):
-    """Get all tables of a specific type across all documents."""
-    from src.adapters.database.models import DocumentRecord
-    from sqlalchemy import text
-    
-    # Search for tables of specific type using PostgreSQL JSON queries
-    query = text("""
-        SELECT d.id, d.filename, d.tables_data
-        FROM documents d
-        WHERE d.tables_data IS NOT NULL 
-        AND d.tables_data::text ILIKE :table_type_pattern
-        LIMIT :limit
-    """)
-    
-    results = db.execute(query, {
-        "table_type_pattern": f'%"table_type": "{table_type}"%',
-        "limit": limit
-    }).fetchall()
-    
-    # Extract matching tables
-    matching_tables = []
-    for row in results:
-        if row.tables_data:
-            for table in row.tables_data:
-                if table.get("table_type") == table_type:
-                    matching_tables.append({
-                        "document_id": row.id,
-                        "filename": row.filename,
-                        "table_index": table.get("table_index"),
-                        "title": table.get("title"),
-                        "section_heading": table.get("section_heading"),
-                        "page_number": table.get("page_number"),
-                        "headers": table.get("headers"),
-                        "row_count": table.get("row_count"),
-                        "column_count": table.get("column_count"),
-                        "confidence_score": table.get("confidence_score")
-                    })
-    
-    return {
-        "table_type": table_type,
-        "total_results": len(matching_tables),
-        "tables": matching_tables
-    }
 
-@app.get("/documents/{document_id}/tables/quality")
-async def get_table_quality_metrics(document_id: int, db: Session = Depends(get_db)):
-    """Get quality metrics for all tables in a document."""
-    service = get_extraction_service(db)
-    document = service.get_document_by_id(document_id)
-    if not document:
-        raise HTTPException(status_code=404, detail="Document not found")
-    
-    quality_metrics = {
-        "document_id": document_id,
-        "filename": document.filename,
-        "total_tables": document.table_count,
-        "tables": []
-    }
-    
-    total_quality = 0
-    total_confidence = 0
-    
-    for table in document.tables:
-        table_metrics = {
-            "table_index": table.table_index,
-            "extraction_method": table.extraction_method,
-            "confidence_score": table.confidence_score,
-            "data_quality_score": table.data_quality_score,
-            "column_types": table.column_types,
-            "processing_time_ms": table.processing_time_ms,
-            "has_errors": bool(table.extraction_errors),
-            "errors": table.extraction_errors or []
-        }
-        quality_metrics["tables"].append(table_metrics)
-        
-        if table.data_quality_score:
-            total_quality += table.data_quality_score
-        if table.confidence_score:
-            total_confidence += table.confidence_score
-    
-    # Calculate overall metrics
-    if document.table_count > 0:
-        quality_metrics["average_quality_score"] = round(total_quality / document.table_count, 2)
-        quality_metrics["average_confidence_score"] = round(total_confidence / document.table_count, 2)
-    else:
-        quality_metrics["average_quality_score"] = 0
-        quality_metrics["average_confidence_score"] = 0
-    
-    return quality_metrics
+
+
 
 @app.get("/tables/export/{document_id}/{table_index}")
 async def export_table(
@@ -660,23 +909,143 @@ async def get_table_statistics(db: Session = Depends(get_db)):
         }
     }
 
-@app.get("/debug/document/{document_id}")
-async def debug_document_raw(document_id: int, db: Session = Depends(get_db)):
-    """Debug endpoint to see raw document data."""
+
+
+# Tabular Data Processing Functions
+def _limit_table_data_for_response(table_data: dict, max_rows: int = None) -> dict:
+    """Limit table data size for API responses to prevent browser crashes"""
+    if max_rows is None:
+        max_rows = config.large_file.max_response_rows
+    
+    # Create a copy to avoid modifying original data
+    limited_data = table_data.copy()
+    
+    # If data exists and is too large, truncate it
+    if 'data' in limited_data and isinstance(limited_data['data'], list):
+        original_size = len(limited_data['data'])
+        if original_size > max_rows:
+            limited_data['data'] = limited_data['data'][:max_rows]
+            limited_data['response_truncated'] = True
+            limited_data['response_sample_size'] = max_rows
+            limited_data['total_rows_available'] = original_size
+            logger.warning(f"Response truncated: showing {max_rows} of {original_size} rows to prevent browser crash")
+        else:
+            limited_data['response_truncated'] = False
+            limited_data['response_sample_size'] = original_size
+    
+    return limited_data
+
+def _is_tabular_file(filename: str, content: bytes) -> bool:
+    """Check if uploaded file is tabular format (CSV, Excel, TSV)"""
+    from src.services.tabular_processor import TabularProcessor
+    
+    # First check: only consider files with explicit tabular extensions
+    filename_lower = filename.lower()
+    if filename_lower.endswith(('.csv', '.tsv', '.xlsx', '.xls')):
+        return TabularProcessor.detect_file_type(filename, content) is not None
+    
+    # Don't treat code files or other structured text as tabular
+    return False
+
+async def _process_tabular_as_table(file: UploadFile, content: bytes, start_time: float, db: Session):
+    """Process tabular file (CSV, Excel, TSV) as structured table data"""
+    import hashlib
     from src.adapters.database.models import DocumentRecord
+    from src.services.tabular_processor import TabularProcessor
     
-    db_document = db.query(DocumentRecord).filter(DocumentRecord.id == document_id).first()
-    if not db_document:
-        raise HTTPException(status_code=404, detail="Document not found")
+    try:
+        # Detect file type
+        file_type = TabularProcessor.detect_file_type(file.filename, content)
+        if not file_type:
+            raise ValueError("Unable to detect tabular file type")
+        
+        # Load as DataFrame
+        df = TabularProcessor.load_dataframe(content, file_type, file.filename)
+        
+        # Create table data structure
+        table_data = TabularProcessor.create_table_data(df, file_type, file.filename)
+        
+        # Store in database
+        file_hash = hashlib.sha256(content).hexdigest()
+        existing = db.query(DocumentRecord).filter(DocumentRecord.file_hash == file_hash).first()
+        
+        if existing:
+            # Update existing record
+            existing.tables_data = [table_data]
+            existing.table_count = 1
+            action = "updated"
+            document_id = existing.id
+        else:
+            # Create new record
+            new_doc = DocumentRecord(
+                filename=file.filename,
+                file_extension=f".{file_type}",  # Set file extension
+                file_size=len(content),  # Set file size in bytes
+                file_hash=file_hash,
+                full_text=f"{file_type.upper()} file with {len(df)} rows and {len(df.columns)} columns",
+                page_count=1,
+                has_ocr_content=0,  # Use integer 0 instead of boolean False
+                processing_method=f"{file_type}_parser",
+                table_count=1,
+                tables_data=[table_data]
+            )
+            db.add(new_doc)
+            db.commit()
+            db.refresh(new_doc)
+            action = "created"
+            document_id = new_doc.id
+        
+        db.commit()
+        
+        # Calculate processing time
+        processing_time = round((time.time() - start_time) * 1000)
+        
+        # Return table-formatted response
+        return {
+            "id": document_id,
+            "filename": file.filename,
+            "full_text": f"{file_type.upper()} table with {len(df)} rows and {len(df.columns)} columns",
+            "page_count": 1,
+            "has_ocr_content": 0,  # Use integer 0 instead of boolean False
+            "processing_method": f"{file_type}_parser",
+            "table_count": 1,
+            "tables": [table_data],
+            "action": action,
+            "processing_time_ms": processing_time,
+            "file_size_bytes": len(content),
+            "data_format": "table",
+            "table_preview": TabularProcessor.get_preview_data(df),
+            "table_info": {
+                "shape": f"{len(df)} rows × {len(df.columns)} columns",
+                "columns": list(df.columns),
+                "data_types": {col: str(df[col].dtype) for col in df.columns}
+            },
+            "data_quality": TabularProcessor.analyze_data_quality(df)
+        }
+        
+    except Exception as e:
+        logger.error(f"Tabular file processing failed: {e}")
+        # Provide more helpful error messages for common issues
+        error_msg = str(e)
+        if "Expected" in error_msg and "fields" in error_msg:
+            error_msg = f"CSV file has inconsistent number of columns. This often happens with malformed CSV files. Original error: {error_msg}"
+        elif "tokenizing data" in error_msg.lower():
+            error_msg = f"CSV file format is invalid or corrupted. Please check the file structure. Original error: {error_msg}"
+        
+        raise HTTPException(status_code=400, detail=f"Failed to process {file_type.upper() if 'file_type' in locals() else 'tabular'} file: {error_msg}")
+
+@app.post("/extract/table/")
+async def extract_tabular_data(file: UploadFile = File(...), db: Session = Depends(get_db)):
+    """Dedicated endpoint for tabular data processing (CSV, Excel, TSV)"""
+    import time
+    start_time = time.time()
     
-    return {
-        "id": db_document.id,
-        "filename": db_document.filename,
-        "table_count": db_document.table_count,
-        "tables_data_type": str(type(db_document.tables_data)),
-        "tables_data_length": len(db_document.tables_data) if db_document.tables_data else 0,
-        "tables_data": db_document.tables_data[:2] if db_document.tables_data else None  # First 2 tables only
-    }
+    content = await file.read()
+    
+    if not _is_tabular_file(file.filename, content):
+        raise HTTPException(status_code=400, detail="File is not a valid tabular format (CSV, Excel, TSV)")
+    
+    return await _process_tabular_as_table(file, content, start_time, db)
 
 @app.get("/health")
 async def health_check():
@@ -700,5 +1069,19 @@ async def health_check():
     except ImportError:
         health["docx_table_extraction"] = "unavailable"
         health["status"] = "degraded"
+    
+    # Check tabular data processing
+    try:
+        import pandas
+        health["tabular_data_processing"] = "available"
+    except ImportError:
+        health["tabular_data_processing"] = "unavailable"
+        health["status"] = "degraded"
+    
+    try:
+        import openpyxl
+        health["excel_processing"] = "available"
+    except ImportError:
+        health["excel_processing"] = "unavailable"
     
     return health

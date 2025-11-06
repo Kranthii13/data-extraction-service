@@ -1,126 +1,86 @@
 # Document Data Extraction Service
 
-A high-performance document processing service that extracts text and tables from various document formats including PDF, DOCX, DOC, and HTML files. Built with FastAPI, PostgreSQL, and advanced OCR capabilities.
+Fast document processing service that extracts text and tables from PDF, DOCX, and HTML files with OCR support.
 
-## 🚀 Features
-
-- **Multi-Format Support**: PDF, DOCX, DOC (HTML exports), HTML, HTM, TXT, and more
-- **Advanced Table Extraction**: Intelligent table detection and extraction with metadata
-- **OCR Processing**: Automatic text extraction from images and scanned documents
-- **Async Processing**: Non-blocking document processing with real-time status updates
-- **Storage Optimization**: 85% storage reduction through compression and deduplication
-- **Full-Text Search**: PostgreSQL-powered search with ranking and relevance
-- **RESTful API**: Complete REST API with comprehensive endpoints
-- **Production Ready**: Docker containerization with auto-scaling support
-
-## 📋 Table of Contents
-
-- [Quick Start](#quick-start)
-- [Installation](#installation)
-- [Configuration](#configuration)
-- [API Usage](#api-usage)
-- [Supported Formats](#supported-formats)
-- [Architecture](#architecture)
-- [Development](#development)
-- [Troubleshooting](#troubleshooting)
-
-## 🚀 Quick Start
+## Quick Setup
 
 ### Prerequisites
-
 - Docker and Docker Compose
 - 4GB+ RAM recommended
-- 10GB+ disk space
 
-### 1. Clone and Setup
-
+### 1. Clone and Start
 ```bash
 git clone <repository-url>
 cd dax-data-extraction
+docker-compose up -d
 ```
 
-### 2. Environment Configuration
+### 2. Test the Service
+```bash
+# Check health
+curl http://localhost:8000/health
 
-Create `.env` file:
+# Upload a document
+curl -X POST "http://localhost:8000/extract/" \
+  -F "file=@your-document.pdf"
+```
+
+That's it! The service is running on http://localhost:8000
+
+## Configuration
+
+The service uses the included `.env` file for configuration. Key settings:
 
 ```bash
-# Database Configuration
+# Database (uses host PostgreSQL)
 POSTGRES_HOST=host.docker.internal
-POSTGRES_PORT=5432
 POSTGRES_DB=filedb
 POSTGRES_USER=postgres
 POSTGRES_PASSWORD=postgres
 
-# Application Configuration
-HOST=0.0.0.0
-PORT=8000
-LOG_LEVEL=info
-
-# OCR Configuration
+# OCR Settings
 OCR_ENABLED=true
 OCR_CONFIDENCE_THRESHOLD=0.1
-OCR_LANGUAGES=eng
 
-# Performance Settings
-MAX_FILE_SIZE_FOR_TABLES=10485760
+# Performance
 FAST_MODE=true
+MAX_FILE_SIZE_FOR_TABLES=5242880  # 5MB limit
 ```
 
-### 3. Start Services
+## API Endpoints
 
+### Upload Document
 ```bash
-# Start all services
-docker-compose up -d
+# Synchronous (wait for completion)
+POST /extract/
+curl -X POST "http://localhost:8000/extract/" -F "file=@document.pdf"
 
-# Check service health
-curl http://localhost:8000/health
+# Asynchronous (immediate response)
+POST /extract/async/
+curl -X POST "http://localhost:8000/extract/async/" -F "file=@document.pdf"
 ```
 
-### 4. Upload Your First Document
-
+### Get Results
 ```bash
-# Upload a document
-curl -X POST "http://localhost:8000/extract/" \
-  -H "Content-Type: multipart/form-data" \
-  -F "file=@your-document.pdf"
+# Get document
+GET /documents/{id}
+curl "http://localhost:8000/documents/1"
 
-# Response includes document ID and extracted data
-{
-  "id": 1,
-  "filename": "your-document.pdf",
-  "table_count": 2,
-  "processing_method": "hybrid_with_ocr",
-  "full_text": "Extracted text content...",
-  "tables": [...]
-}
+# Get tables
+GET /documents/{id}/tables
+curl "http://localhost:8000/documents/1/tables"
+
+# Search documents
+GET /search/?q={query}
+curl "http://localhost:8000/search/?q=financial"
 ```
 
-## 🛠 Installation
+## Local Development
 
-### Option 1: Docker (Recommended)
-
-```bash
-# Clone repository
-git clone <repository-url>
-cd dax-data-extraction
-
-# Configure environment
-cp .env.example .env
-# Edit .env with your settings
-
-# Start services
-docker-compose up -d
-
-# Verify installation
-curl http://localhost:8000/health
-```
-
-### Option 2: Local Development
-
+### Without Docker
 ```bash
 # Install system dependencies (Ubuntu/Debian)
-sudo apt-get update
-sudo apt-get install -y tesseract-ocr tesseract-ocr-eng postgresql-client
+sudo apt-get install tesseract-ocr tesseract-ocr-eng postgresql
 
 # Install Python dependencies
 pip install -r requirements.txt
@@ -133,177 +93,90 @@ export DATABASE_URL="postgresql://user:pass@localhost/filedb"
 python src/app_main.py
 ```
 
-## ⚙️ Configuration
-
-### Environment Variables
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `POSTGRES_HOST` | localhost | Database host |
-| `POSTGRES_PORT` | 5432 | Database port |
-| `POSTGRES_DB` | filedb | Database name |
-| `POSTGRES_USER` | postgres | Database user |
-| `POSTGRES_PASSWORD` | postgres | Database password |
-| `HOST` | 0.0.0.0 | API server host |
-| `PORT` | 8000 | API server port |
-| `LOG_LEVEL` | info | Logging level |
-| `OCR_ENABLED` | true | Enable OCR processing |
-| `OCR_CONFIDENCE_THRESHOLD` | 0.1 | OCR confidence threshold |
-| `OCR_LANGUAGES` | eng | OCR languages (comma-separated) |
-| `MAX_FILE_SIZE_FOR_TABLES` | 10485760 | Max file size for table extraction (bytes) |
-| `FAST_MODE` | true | Enable performance optimizations |
-
-### Production Configuration
-
-For production deployment, update these settings:
-
+### With Docker (Development)
 ```bash
-# Production optimizations
-FAST_MODE=true
-LOG_LEVEL=warning
+# Start with source code mounting (for live editing)
+docker-compose up -d
 
-# Security
-POSTGRES_PASSWORD=<strong-password>
+# View logs
+docker-compose logs -f extraction_service
 
-# Performance
-MAX_FILE_SIZE_FOR_TABLES=52428800  # 50MB
-OCR_CONFIDENCE_THRESHOLD=0.3
+# Stop services
+docker-compose down
 ```
 
-## 📡 API Usage
+## Supported Formats
 
-### Core Endpoints
+| Format | Extension | Table Extraction | OCR Support |
+|--------|-----------|------------------|-------------|
+| PDF | `.pdf` | ✅ | ✅ |
+| Word Document | `.docx` | ✅ | ❌ |
+| HTML | `.html`, `.htm` | ✅ | ❌ |
+| Plain Text | `.txt` | ❌ | ❌ |
 
-#### Upload Document (Synchronous)
+## Troubleshooting
+
+### Service Won't Start
 ```bash
-POST /extract/
-Content-Type: multipart/form-data
+# Check Docker status
+docker-compose ps
 
-curl -X POST "http://localhost:8000/extract/" \
-  -F "file=@document.pdf"
+# Check logs
+docker-compose logs extraction_service
+
+# Restart services
+docker-compose down && docker-compose up -d
 ```
 
-#### Upload Document (Asynchronous)
+### Database Connection Issues
 ```bash
-POST /extract/async/
-Content-Type: multipart/form-data
+# Check database connectivity
+docker-compose exec extraction_service pg_isready -h host.docker.internal -p 5432
 
-# Upload
-curl -X POST "http://localhost:8000/extract/async/" \
-  -F "file=@large-document.pdf"
-
-# Check status
-curl "http://localhost:8000/extract/status/{task_id}"
+# Reset database
+docker-compose down -v && docker-compose up -d
 ```
 
-#### Get Document
+### OCR Not Working
 ```bash
-GET /documents/{document_id}
-
-curl "http://localhost:8000/documents/1"
+# Check Tesseract installation
+docker-compose exec extraction_service tesseract --version
 ```
 
-#### Get Document Tables
-```bash
-GET /documents/{document_id}/tables
+### Performance Issues
+- Reduce `MAX_FILE_SIZE_FOR_TABLES` in `.env`
+- Set `FAST_MODE=true`
+- Check available RAM (4GB+ recommended)
 
-curl "http://localhost:8000/documents/1/tables"
-```
+### Code Files Treated as CSV
+If .tsx, .css, or other code files are being processed incorrectly:
+- This issue has been fixed in the latest version
+- Code files are now properly detected and processed as text documents
+- Only files with explicit tabular extensions (.csv, .tsv, .xlsx, .xls) are treated as tabular data
 
-#### Search Documents
-```bash
-GET /search/?q={query}&limit={limit}
+### CSV Files Processed as Text (Async Endpoint)
+If CSV files uploaded via `/extract/async/` are being treated as text:
+- This issue has been fixed in the latest version
+- Both sync and async endpoints now properly detect and process CSV files as tabular data
+- CSV files will return structured table data with columns, data types, and quality metrics
 
-curl "http://localhost:8000/search/?q=financial%20report&limit=10"
-```
+### Database Type Mismatch Error
+If you see "column 'has_ocr_content' is of type integer but expression is of type boolean":
+- This issue has been fixed in the latest version
+- All boolean values are now properly converted to integers (0/1) before database insertion
+- The database schema uses INTEGER type for boolean flags for PostgreSQL compatibility
 
-### Table-Specific Endpoints
+### Browser Crashes with Large Files
+If your browser crashes when uploading large files with tables (PDF, DOCX, HTML, CSV):
+- This issue has been fixed with universal pagination and response size limits
+- Large table data from ANY document type is automatically truncated in responses
+- Use pagination parameters (`?page=1&page_size=100`) to access full data
+- Works for all document types: PDF tables, DOCX tables, HTML tables, CSV data
+- Configure limits in `.env`: `MAX_RESPONSE_ROWS`, `MAX_STORAGE_ROWS`, `MAX_PREVIEW_ROWS`
 
-#### Get Specific Table
-```bash
-GET /documents/{document_id}/tables/{table_index}?format={json|html|markdown}
+---
 
-curl "http://localhost:8000/documents/1/tables/0?format=json"
-```
-
-#### Export Table
-```bash
-GET /tables/export/{document_id}/{table_index}?format={csv|excel|json}
-
-curl "http://localhost:8000/tables/export/1/0?format=csv" -o table.csv
-```
-
-#### Search Tables
-```bash
-GET /tables/search?q={query}
-
-curl "http://localhost:8000/tables/search?q=revenue"
-```
-
-#### Get Tables by Type
-```bash
-GET /tables/by-type/{table_type}
-
-curl "http://localhost:8000/tables/by-type/financial"
-```
-
-### Response Examples
-
-#### Document Upload Response
-```json
-{
-  "id": 1,
-  "filename": "financial-report.pdf",
-  "full_text": "Q3 Financial Report...",
-  "page_count": 15,
-  "has_ocr_content": true,
-  "processing_method": "hybrid_with_ocr",
-  "table_count": 3,
-  "tables": [
-    {
-      "table_index": 0,
-      "headers": ["Quarter", "Revenue", "Profit"],
-      "rows": [
-        ["Q1", "$1.2M", "$200K"],
-        ["Q2", "$1.5M", "$300K"]
-      ],
-      "row_count": 2,
-      "column_count": 3,
-      "table_type": "financial",
-      "confidence_score": 0.98
-    }
-  ],
-  "action": "created",
-  "processing_time_ms": 1250
-}
-```
-
-#### Table Details Response
-```json
-{
-  "document_id": 1,
-  "filename": "financial-report.pdf",
-  "table_count": 3,
-  "tables": [
-    {
-      "table_index": 0,
-      "page_number": 5,
-      "title": "Quarterly Revenue",
-      "context_before": "Financial Performance Summary",
-      "headers": ["Quarter", "Revenue", "Profit", "Growth"],
-      "rows": [
-        ["Q1 2024", "$1,200,000", "$200,000", "15%"],
-        ["Q2 2024", "$1,500,000", "$300,000", "25%"]
-      ],
-      "row_count": 2,
-      "column_count": 4,
-      "table_type": "financial",
-      "confidence_score": 0.98,
-      "extraction_method": "pdf_parser"
-    }
-  ]
-}
-```
+For detailed technical information, see [DOCUMENTATION.md](DOCUMENTATION.md)
 
 ## 📄 Supported Formats
 
@@ -601,5 +474,6 @@ For issues and questions:
 
 ## 📄 License
 
-This project is licensed under the MIT License - see the LICENSE file for details.#   d a t a - e x t r a c t i o n - s e r v i c e  
+This project is licensed under the MIT License - see the LICENSE file for details.#   d a t a - e x t r a c t i o n - s e r v i c e 
+ 
  

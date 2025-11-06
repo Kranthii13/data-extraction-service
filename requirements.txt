@@ -1,22 +1,19 @@
-# Data Extraction Service - Production Grade
+pandas>=2.0.0
+numpy>=1.24.0
+openpyxl>=3.1.0
+xlrd>=2.0.0
+fastparquet>=0.8.0
 fastapi
-uvicorn[standard]
-pydantic
-PyMuPDF
-python-docx
-pytesseract
-Pillow
+uvicorn
 sqlalchemy
 psycopg2-binary
 python-dotenv
-python-multipart
-
-# Production scaling and analytics
+PyMuPDF
+pytesseract
+python-docx
+pydantic
+Pillow
+beautifulsoup4
 celery
 redis
-openpyxl
-
-# Enhanced data processing
-pandas
-numpy
-beautifulsoup4
+python-multipart

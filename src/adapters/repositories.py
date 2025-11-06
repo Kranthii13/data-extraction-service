@@ -75,8 +75,37 @@ class SqlDocumentRepository(IDocumentRepository):
             
             if extracted_data._raw_tables:
                 logger.info(f"Saving {len(extracted_data._raw_tables)} tables to database")
-                # Use the raw table data directly (already in dictionary format)
-                db_document.tables_data = extracted_data._raw_tables
+                # Convert old format to new key-value format
+                converted_tables = []
+                for table_dict in extracted_data._raw_tables:
+                    # Create key-value data format from headers and rows
+                    data_records = []
+                    if table_dict.get('headers') and table_dict.get('rows'):
+                        headers = table_dict['headers']
+                        rows = table_dict['rows']
+                        for row in rows:
+                            if len(row) == len(headers):
+                                record = {header: (value if value is not None else None) for header, value in zip(headers, row)}
+                                data_records.append(record)
+                    
+                    # Create new table structure with only key-value format
+                    new_table = {
+                        "table_index": table_dict.get("table_index", 0),
+                        "page_number": table_dict.get("page_number"),
+                        "title": table_dict.get("title", ""),
+                        "context_before": table_dict.get("context_before", ""),
+                        "context_after": table_dict.get("context_after", ""),
+                        "section_heading": table_dict.get("section_heading", ""),
+                        "data": data_records,  # Key-value format only
+                        "row_count": table_dict.get("row_count", len(data_records)),
+                        "column_count": table_dict.get("column_count", len(table_dict.get('headers', []))),
+                        "table_type": table_dict.get("table_type"),
+                        "confidence_score": table_dict.get("confidence_score"),
+                        "extraction_method": table_dict.get("extraction_method")
+                    }
+                    converted_tables.append(new_table)
+                
+                db_document.tables_data = converted_tables
             else:
                 logger.warning("_raw_tables is empty")
         else:
@@ -371,8 +400,37 @@ class SqlDocumentRepository(IDocumentRepository):
         
         if hasattr(extracted_data, '_raw_tables') and extracted_data._raw_tables:
             logger.info(f"Updating with {len(extracted_data._raw_tables)} tables")
-            # Use the raw table data directly (already in dictionary format)
-            existing.tables_data = extracted_data._raw_tables
+            # Convert old format to new key-value format
+            converted_tables = []
+            for table_dict in extracted_data._raw_tables:
+                # Create key-value data format from headers and rows
+                data_records = []
+                if table_dict.get('headers') and table_dict.get('rows'):
+                    headers = table_dict['headers']
+                    rows = table_dict['rows']
+                    for row in rows:
+                        if len(row) == len(headers):
+                            record = {header: (value if value is not None else None) for header, value in zip(headers, row)}
+                            data_records.append(record)
+                
+                # Create new table structure with only key-value format
+                new_table = {
+                    "table_index": table_dict.get("table_index", 0),
+                    "page_number": table_dict.get("page_number"),
+                    "title": table_dict.get("title", ""),
+                    "context_before": table_dict.get("context_before", ""),
+                    "context_after": table_dict.get("context_after", ""),
+                    "section_heading": table_dict.get("section_heading", ""),
+                    "data": data_records,  # Key-value format only
+                    "row_count": table_dict.get("row_count", len(data_records)),
+                    "column_count": table_dict.get("column_count", len(table_dict.get('headers', []))),
+                    "table_type": table_dict.get("table_type"),
+                    "confidence_score": table_dict.get("confidence_score"),
+                    "extraction_method": table_dict.get("extraction_method")
+                }
+                converted_tables.append(new_table)
+            
+            existing.tables_data = converted_tables
         else:
             logger.warning("No _raw_tables found in update, setting to None")
             existing.tables_data = None

@@ -41,6 +41,12 @@ class DocumentTable(BaseModel):
     confidence_score: Optional[float] = None   # Extraction confidence (0-1)
     extraction_method: Optional[str] = None    # Method used (pymupdf, ocr, text_pattern)
     processing_time_ms: Optional[int] = None   # Time taken to extract this table
+    
+    # Large file handling metadata (for all document types)
+    is_truncated: Optional[bool] = False       # Whether table data was truncated
+    original_row_count: Optional[int] = None   # Original number of rows before truncation
+    stored_row_count: Optional[int] = None     # Number of rows actually stored
+    truncation_reason: Optional[str] = None    # Reason for truncation
 
 class ExtractedData(BaseModel):
     """The structured data we get from a document."""

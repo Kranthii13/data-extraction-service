@@ -49,6 +49,15 @@ class TableExtractionConfig:
             self.detection_methods = ['pymupdf', 'ocr', 'text_pattern']
 
 @dataclass
+class LargeFileConfig:
+    """Configuration for handling large files to prevent browser crashes"""
+    max_response_rows: int = int(os.getenv('MAX_RESPONSE_ROWS', '1000'))  # Max rows in API response
+    max_storage_rows: int = int(os.getenv('MAX_STORAGE_ROWS', '10000'))  # Max rows stored in database
+    max_preview_rows: int = int(os.getenv('MAX_PREVIEW_ROWS', '100'))  # Max rows in preview
+    enable_pagination: bool = os.getenv('ENABLE_PAGINATION', 'true').lower() == 'true'
+    chunk_size: int = int(os.getenv('CHUNK_SIZE', '1000'))  # Rows per chunk for streaming
+
+@dataclass
 class AppConfig:
     """Main application configuration"""
     host: str = os.getenv('HOST', '0.0.0.0')
@@ -65,6 +74,7 @@ class ServiceConfig:
     database: DatabaseConfig
     ocr: OCRConfig
     table_extraction: TableExtractionConfig
+    large_file: LargeFileConfig
     
     @classmethod
     def load(cls) -> 'ServiceConfig':
@@ -73,7 +83,8 @@ class ServiceConfig:
             app=AppConfig(),
             database=DatabaseConfig(),
             ocr=OCRConfig(),
-            table_extraction=TableExtractionConfig()
+            table_extraction=TableExtractionConfig(),
+            large_file=LargeFileConfig()
         )
 
 # Global configuration instance
