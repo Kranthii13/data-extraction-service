@@ -298,6 +298,199 @@ CHUNK_SIZE=1000           # Streaming chunk size
 
 **Current Status:** ✅ Solved - Large tables from ANY document type no longer crash browsers, universal pagination available
 
+### 11. Async Status Endpoint Browser Crashes
+
+**Problem:** Async status endpoint (`/extract/status/{task_id}`) returned large task results that crashed browsers
+
+**Root Cause:** 
+- Async task results contained full table data without size limits
+- Status endpoint returned raw results from background processing
+- Both Celery and BackgroundTasks stored unlimited data in task results
+
+**Solutions Implemented:**
+- **Status Response Limiting**: Apply size limits to task results before returning from status endpoint
+- **Background Task Limiting**: Apply size limits when storing results in background processing
+- **Celery Task Limiting**: Apply size limits in Celery task return values
+- **Universal Coverage**: Works for both tabular files and regular documents with tables
+- **Consistent Behavior**: Same size limits as other endpoints (100 rows default)
+
+**Current Status:** ✅ Solved - Async status responses are size-limited and won't crash browsers
+
+## TabularProcessor Component
+
+### Overview
+
+The `TabularProcessor` is a specialized component designed to handle tabular data files (CSV, TSV, Excel) with advanced features for large file handling, data quality analysis, and browser crash prevention.
+
+### Key Features
+
+**File Type Detection:**
+- Automatic detection of CSV, TSV, Excel formats
+- Content-based detection for files without extensions
+- Smart delimiter detection (comma, semicolon, tab, pipe)
+- Exclusion of code files and binary formats
+
+**Large File Handling:**
+- Configurable row limits to prevent browser crashes
+- Automatic truncation with metadata preservation
+- Memory usage optimization
+- Preview data generation
+
+**Data Quality Analysis:**
+- Null value counting and reporting
+- Duplicate row detection
+- Memory usage calculation
+- Data type inference and validation
+
+**Robust Parsing:**
+- Multi-stage parsing with fallback mechanisms
+- Error handling for malformed data
+- Flexible delimiter detection
+- Quote and escape character handling
+
+### Methods and Functionality
+
+#### `detect_file_type(filename: str, content: bytes) -> Optional[str]`
+
+**Purpose:** Intelligently detects tabular file types
+
+**Features:**
+- Extension-based detection (.csv, .tsv, .xlsx, .xls)
+- Content-based detection for ambiguous files
+- Excludes code files and binary formats
+- Validates tabular structure consistency
+
+**Returns:** 'csv', 'tsv', 'excel', or None
+
+#### `load_dataframe(content: bytes, file_type: str, filename: str) -> pd.DataFrame`
+
+**Purpose:** Loads tabular data into pandas DataFrame with robust error handling
+
+**Features:**
+- Multi-stage parsing with fallback mechanisms
+- Automatic delimiter detection for CSV files
+- Excel file support with multiple sheets
+- Error recovery and flexible parsing options
+
+**Supported Formats:**
+- CSV (comma, semicolon, tab, pipe delimited)
+- TSV (tab-separated values)
+- Excel (.xlsx, .xls)
+
+#### `create_table_data(df: pd.DataFrame, file_type: str, filename: str, max_rows: int) -> Dict`
+
+**Purpose:** Creates standardized table data structure with size limits
+
+**Features:**
+- Configurable row limits (default: 10,000 rows)
+- Automatic truncation for large datasets
+- Metadata preservation (original row count, truncation flags)
+- Key-value data format for consistency
+
+**Output Structure:**
+```json
+{
+  "table_index": 0,
+  "title": "CSV Data: filename.csv",
+  "headers": ["Column1", "Column2"],
+  "data": [{"Column1": "Value1", "Column2": "Value2"}],
+  "row_count": 15000,
+  "sample_size": 10000,
+  "is_truncated": true,
+  "table_type": "csv_data",
+  "confidence_score": 1.0,
+  "column_types": {"Column1": "object", "Column2": "int64"}
+}
+```
+
+#### `get_preview_data(df: pd.DataFrame, rows: int) -> List[Dict]`
+
+**Purpose:** Generates size-limited preview data for API responses
+
+**Features:**
+- Configurable preview size (default: 50 rows)
+- NaN value handling for JSON serialization
+- Memory-efficient preview generation
+- Browser crash prevention
+
+#### `analyze_data_quality(df: pd.DataFrame) -> Dict`
+
+**Purpose:** Provides comprehensive data quality metrics
+
+**Output:**
+```json
+{
+  "null_counts": {"Column1": 0, "Column2": 15},
+  "duplicate_rows": 3,
+  "memory_usage_mb": 2.5,
+  "data_types": {"Column1": "object", "Column2": "int64"}
+}
+```
+
+### Integration with Main Service
+
+**File Processing Flow:**
+1. `_is_tabular_file()` uses `detect_file_type()` to identify tabular files
+2. `load_dataframe()` parses the file content
+3. `create_table_data()` applies size limits and creates structured data
+4. `get_preview_data()` generates browser-safe previews
+5. `analyze_data_quality()` provides quality metrics
+
+**Size Limiting Integration:**
+- Works with global configuration (`MAX_STORAGE_ROWS`, `MAX_PREVIEW_ROWS`)
+- Integrates with universal size limiting for all document types
+- Provides consistent truncation metadata across all endpoints
+
+**API Integration:**
+- Used in both sync (`/extract/`) and async (`/extract/async/`) endpoints
+- Provides data for table-specific endpoints
+- Supports pagination and export functionality
+
+### Configuration
+
+The TabularProcessor respects global configuration settings:
+
+```bash
+MAX_STORAGE_ROWS=10000     # Max rows stored per table
+MAX_PREVIEW_ROWS=50        # Max rows in preview responses
+MAX_RESPONSE_ROWS=100      # Max rows in API responses
+```
+
+### Error Handling
+
+**Robust Parsing Strategy:**
+1. **Strict Parsing**: Standard pandas parsing
+2. **Flexible Parsing**: Skip spaces, blank lines, minimal quoting
+3. **Permissive Parsing**: Handle malformed data, mixed types
+4. **Fallback**: Error reporting with partial data recovery
+
+**Common Issues Handled:**
+- Mixed data types in columns
+- Inconsistent delimiters
+- Malformed quotes and escapes
+- Memory limitations with large files
+- Encoding issues (UTF-8 fallback)
+
+### Performance Optimizations
+
+**Memory Management:**
+- Streaming data processing for large files
+- Configurable chunk sizes
+- Memory usage monitoring and reporting
+- Garbage collection optimization
+
+**Processing Speed:**
+- Efficient delimiter detection
+- Optimized data type inference
+- Minimal data copying
+- Vectorized operations where possible
+
+**Browser Safety:**
+- Automatic size limiting
+- Preview generation
+- Truncation with metadata
+- Memory-safe JSON serialization
+
 ## Architecture Details
 
 ### System Components

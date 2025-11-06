@@ -190,9 +190,11 @@ def get_parser_map() -> Dict[str, IDocumentParser]:
         ".gitattributes": generic_parser, # Git attributes
         ".dockerignore": generic_parser, # Docker ignore
         
-        # Data formats
-        ".csv": generic_parser,     # CSV
-        ".tsv": generic_parser,     # TSV
+        # Data formats (handled by TabularProcessor via API logic)
+        ".csv": generic_parser,     # CSV (processed as tabular via _is_tabular_file)
+        ".tsv": generic_parser,     # TSV (processed as tabular via _is_tabular_file)
+        ".xlsx": generic_parser,    # Excel (processed as tabular via _is_tabular_file)
+        ".xls": generic_parser,     # Excel (processed as tabular via _is_tabular_file)
         ".sql": generic_parser,     # SQL
         ".graphql": generic_parser, # GraphQL
         ".gql": generic_parser,     # GraphQL

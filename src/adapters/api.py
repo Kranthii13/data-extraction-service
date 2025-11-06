@@ -133,14 +133,15 @@ try:
                 
                 processing_time = int((time.time() - start_time) * 1000)
                 
-                return {
+                # Create result with size limits for Celery task
+                celery_result = {
                     "id": document_id,
                     "filename": document.filename,
                     "action": action,
                     "processing_time_ms": processing_time,
                     "file_size_bytes": len(content),
                     "data_format": "table",
-                    "table_preview": TabularProcessor.get_preview_data(df),
+                    "table_preview": TabularProcessor.get_preview_data(df),  # Already limited
                     "table_info": {
                         "shape": f"{len(df)} rows × {len(df.columns)} columns",
                         "columns": list(df.columns),
@@ -148,18 +149,58 @@ try:
                     },
                     "data_quality": TabularProcessor.analyze_data_quality(df)
                 }
+                
+                # Apply size limits to prevent browser crashes in async responses
+                return _apply_size_limits_to_task_result(celery_result)
             else:
                 # Regular document processing
                 service = get_extraction_service(db)
                 result = service.extract_from_document(document)
-                return {
+                
+                # Create result for Celery task with size limits
+                celery_result = {
                     'id': getattr(result, 'id', None),
                     'filename': document_data['filename'],
                     'page_count': result.page_count,
                     'processing_method': result.processing_method,
                     'has_ocr_content': result.has_ocr_content,
-                    'text_preview': result.full_text[:200] + "..." if len(result.full_text) > 200 else result.full_text
+                    'text_preview': result.full_text[:200] + "..." if len(result.full_text) > 200 else result.full_text,
+                    'table_count': result.table_count
                 }
+                
+                # Include limited table data if present
+                if hasattr(result, 'tables') and result.tables:
+                    limited_tables = []
+                    for table in result.tables:
+                        table_dict = {
+                            "table_index": table.table_index,
+                            "page_number": table.page_number,
+                            "title": table.title,
+                            "row_count": table.row_count,
+                            "column_count": table.column_count,
+                            "table_type": table.table_type,
+                            "confidence_score": table.confidence_score,
+                            "extraction_method": table.extraction_method,
+                            # Include truncation metadata
+                            "is_truncated": getattr(table, 'is_truncated', False),
+                            "original_row_count": getattr(table, 'original_row_count', table.row_count),
+                            "stored_row_count": getattr(table, 'stored_row_count', table.row_count)
+                        }
+                        
+                        # Add limited row data (preview only for Celery results)
+                        if table.rows:
+                            from src.config.app_config import config
+                            preview_size = min(config.large_file.max_response_rows, len(table.rows))
+                            table_dict['rows_preview'] = table.rows[:preview_size]
+                            table_dict['preview_truncated'] = len(table.rows) > preview_size
+                            table_dict['total_rows_available'] = len(table.rows)
+                        
+                        limited_tables.append(table_dict)
+                    
+                    celery_result['tables'] = limited_tables
+                
+                # Apply size limits to prevent browser crashes in async responses
+                return _apply_size_limits_to_task_result(celery_result)
         finally:
             db.close()
     
@@ -268,39 +309,83 @@ async def process_document_background(task_id: str, document: Document, db: Sess
             
             processing_time = int((time.time() - start_time) * 1000)
             
+            # Create result with size limits applied
+            task_result = {
+                "id": document_id,
+                "filename": document.filename,
+                "action": action,
+                "processing_time_ms": processing_time,
+                "file_size_bytes": len(document.content),
+                "data_format": "table",
+                "table_preview": TabularProcessor.get_preview_data(df),  # Already limited by get_preview_data
+                "table_info": {
+                    "shape": f"{len(df)} rows × {len(df.columns)} columns",
+                    "columns": list(df.columns),
+                    "data_types": {col: str(df[col].dtype) for col in df.columns}
+                },
+                "data_quality": TabularProcessor.analyze_data_quality(df)
+            }
+            
+            # Apply additional size limits to prevent browser crashes
+            limited_result = _apply_size_limits_to_task_result(task_result)
+            
             update_task_status(task_id, {
                 "status": TaskStatus.COMPLETED,
-                "result": {
-                    "id": document_id,
-                    "filename": document.filename,
-                    "action": action,
-                    "processing_time_ms": processing_time,
-                    "file_size_bytes": len(document.content),
-                    "data_format": "table",
-                    "table_preview": TabularProcessor.get_preview_data(df),
-                    "table_info": {
-                        "shape": f"{len(df)} rows × {len(df.columns)} columns",
-                        "columns": list(df.columns),
-                        "data_types": {col: str(df[col].dtype) for col in df.columns}
-                    },
-                    "data_quality": TabularProcessor.analyze_data_quality(df)
-                }
+                "result": limited_result
             })
         else:
             # Regular document processing
             service = get_extraction_service(db)
             result = service.extract_from_document(document)
             
+            # Create result for regular documents
+            task_result = {
+                "id": getattr(result, 'id', None),
+                "filename": document.filename,
+                "page_count": result.page_count,
+                "processing_method": result.processing_method,
+                "has_ocr_content": result.has_ocr_content,
+                "text_preview": result.full_text[:200] + "..." if len(result.full_text) > 200 else result.full_text,
+                "table_count": result.table_count
+            }
+            
+            # Include limited table data if present
+            if hasattr(result, 'tables') and result.tables:
+                # Convert tables to serializable format with size limits
+                limited_tables = []
+                for table in result.tables:
+                    table_dict = {
+                        "table_index": table.table_index,
+                        "page_number": table.page_number,
+                        "title": table.title,
+                        "row_count": table.row_count,
+                        "column_count": table.column_count,
+                        "table_type": table.table_type,
+                        "confidence_score": table.confidence_score,
+                        "extraction_method": table.extraction_method,
+                        # Include truncation metadata
+                        "is_truncated": getattr(table, 'is_truncated', False),
+                        "original_row_count": getattr(table, 'original_row_count', table.row_count),
+                        "stored_row_count": getattr(table, 'stored_row_count', table.row_count)
+                    }
+                    
+                    # Add limited row data (preview only for async results)
+                    if table.rows:
+                        preview_size = min(config.large_file.max_response_rows, len(table.rows))
+                        table_dict['rows_preview'] = table.rows[:preview_size]
+                        table_dict['preview_truncated'] = len(table.rows) > preview_size
+                        table_dict['total_rows_available'] = len(table.rows)
+                    
+                    limited_tables.append(table_dict)
+                
+                task_result['tables'] = limited_tables
+            
+            # Apply additional size limits
+            limited_result = _apply_size_limits_to_task_result(task_result)
+            
             update_task_status(task_id, {
                 "status": TaskStatus.COMPLETED,
-                "result": {
-                    "id": getattr(result, 'id', None),
-                    "filename": document.filename,
-                    "page_count": result.page_count,
-                    "processing_method": result.processing_method,
-                    "has_ocr_content": result.has_ocr_content,
-                    "text_preview": result.full_text[:200] + "..." if len(result.full_text) > 200 else result.full_text
-                }
+                "result": limited_result
             })
         
     except Exception as e:
@@ -445,7 +530,7 @@ async def extract_async(
 
 @app.get("/extract/status/{task_id}")
 async def get_status(task_id: str):
-    """Get task status."""
+    """Get task status with size-limited results to prevent browser crashes."""
     status = get_task_status(task_id)
     if not status:
         raise HTTPException(status_code=404, detail="Task not found")
@@ -454,9 +539,14 @@ async def get_status(task_id: str):
     if USE_CELERY and 'celery_task_id' in status:
         celery_task = celery_app.AsyncResult(status['celery_task_id'])
         if celery_task.state == 'SUCCESS':
+            # Apply size limits to Celery result before storing
+            celery_result = celery_task.result
+            if isinstance(celery_result, dict):
+                celery_result = _apply_size_limits_to_task_result(celery_result)
+            
             update_task_status(task_id, {
                 "status": TaskStatus.COMPLETED,
-                "result": celery_task.result
+                "result": celery_result
             })
             status = get_task_status(task_id)
         elif celery_task.state == 'FAILURE':
@@ -465,6 +555,10 @@ async def get_status(task_id: str):
                 "error": str(celery_task.info)
             })
             status = get_task_status(task_id)
+    
+    # Apply size limits to the result before returning (for both Celery and BackgroundTasks)
+    if status and status.get('result'):
+        status['result'] = _apply_size_limits_to_task_result(status['result'])
     
     return status
 
@@ -912,6 +1006,70 @@ async def get_table_statistics(db: Session = Depends(get_db)):
 
 
 # Tabular Data Processing Functions
+def _apply_size_limits_to_task_result(result: dict) -> dict:
+    """
+    Apply size limits to async task results to prevent browser crashes.
+    This ensures that async task status responses don't contain large datasets.
+    """
+    if not isinstance(result, dict):
+        return result
+    
+    # Create a copy to avoid modifying the original
+    limited_result = result.copy()
+    
+    # Limit table_preview data if present (for tabular files)
+    if 'table_preview' in limited_result and isinstance(limited_result['table_preview'], list):
+        preview_data = limited_result['table_preview']
+        if len(preview_data) > config.large_file.max_response_rows:
+            limited_result['table_preview'] = preview_data[:config.large_file.max_response_rows]
+            limited_result['preview_truncated'] = True
+            limited_result['preview_sample_size'] = config.large_file.max_response_rows
+            limited_result['total_preview_rows'] = len(preview_data)
+            logger.info(f"Task result preview truncated: showing {config.large_file.max_response_rows} of {len(preview_data)} rows")
+        else:
+            limited_result['preview_truncated'] = False
+    
+    # Limit any tables data if present (for regular documents)
+    if 'tables' in limited_result and isinstance(limited_result['tables'], list):
+        limited_tables = []
+        for table in limited_result['tables']:
+            if isinstance(table, dict):
+                limited_table = table.copy()
+                
+                # Limit table rows/data
+                if 'rows' in limited_table and isinstance(limited_table['rows'], list):
+                    rows = limited_table['rows']
+                    if len(rows) > config.large_file.max_response_rows:
+                        limited_table['rows'] = rows[:config.large_file.max_response_rows]
+                        limited_table['response_truncated'] = True
+                        limited_table['response_sample_size'] = config.large_file.max_response_rows
+                        limited_table['total_rows_available'] = len(rows)
+                    else:
+                        limited_table['response_truncated'] = False
+                
+                # Limit table data field (for CSV-style data)
+                if 'data' in limited_table and isinstance(limited_table['data'], list):
+                    data = limited_table['data']
+                    if len(data) > config.large_file.max_response_rows:
+                        limited_table['data'] = data[:config.large_file.max_response_rows]
+                        limited_table['data_truncated'] = True
+                        limited_table['data_sample_size'] = config.large_file.max_response_rows
+                        limited_table['total_data_rows'] = len(data)
+                    else:
+                        limited_table['data_truncated'] = False
+                
+                limited_tables.append(limited_table)
+            else:
+                limited_tables.append(table)
+        
+        limited_result['tables'] = limited_tables
+    
+    # Add metadata about size limiting
+    limited_result['size_limits_applied'] = True
+    limited_result['max_response_rows'] = config.large_file.max_response_rows
+    
+    return limited_result
+
 def _limit_table_data_for_response(table_data: dict, max_rows: int = None) -> dict:
     """Limit table data size for API responses to prevent browser crashes"""
     if max_rows is None:

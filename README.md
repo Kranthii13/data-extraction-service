@@ -45,6 +45,12 @@ OCR_CONFIDENCE_THRESHOLD=0.1
 # Performance
 FAST_MODE=true
 MAX_FILE_SIZE_FOR_TABLES=5242880  # 5MB limit
+
+# TabularProcessor Settings (Large File Handling)
+MAX_STORAGE_ROWS=5000             # Max rows stored per table
+MAX_RESPONSE_ROWS=100             # Max rows in API responses  
+MAX_PREVIEW_ROWS=50               # Max rows in previews
+ENABLE_PAGINATION=true            # Enable table pagination
 ```
 
 ## API Endpoints
@@ -73,6 +79,35 @@ curl "http://localhost:8000/documents/1/tables"
 # Search documents
 GET /search/?q={query}
 curl "http://localhost:8000/search/?q=financial"
+```
+
+### TabularProcessor API Responses
+
+For CSV/TSV/Excel files, the TabularProcessor provides enhanced responses:
+
+```json
+{
+  "id": 1,
+  "filename": "data.csv",
+  "data_format": "table",
+  "table_preview": [
+    {"Name": "John", "Age": 30, "City": "NYC"},
+    {"Name": "Jane", "Age": 25, "City": "LA"}
+  ],
+  "table_info": {
+    "shape": "10000 rows × 5 columns",
+    "columns": ["Name", "Age", "City", "Salary", "Department"],
+    "data_types": {"Name": "object", "Age": "int64", "City": "object"}
+  },
+  "data_quality": {
+    "null_counts": {"Name": 0, "Age": 2, "City": 0},
+    "duplicate_rows": 5,
+    "memory_usage_mb": 2.3
+  },
+  "is_truncated": true,
+  "original_row_count": 10000,
+  "stored_row_count": 5000
+}
 ```
 
 ## Local Development
@@ -107,12 +142,31 @@ docker-compose down
 
 ## Supported Formats
 
-| Format | Extension | Table Extraction | OCR Support |
-|--------|-----------|------------------|-------------|
-| PDF | `.pdf` | ✅ | ✅ |
-| Word Document | `.docx` | ✅ | ❌ |
-| HTML | `.html`, `.htm` | ✅ | ❌ |
-| Plain Text | `.txt` | ❌ | ❌ |
+| Format | Extension | Table Extraction | OCR Support | Processor |
+|--------|-----------|------------------|-------------|-----------|
+| CSV | `.csv` | ✅ | ❌ | TabularProcessor |
+| TSV | `.tsv` | ✅ | ❌ | TabularProcessor |
+| Excel | `.xlsx`, `.xls` | ✅ | ❌ | TabularProcessor |
+| PDF | `.pdf` | ✅ | ✅ | PdfParser |
+| Word Document | `.docx` | ✅ | ❌ | DocxParser |
+| HTML | `.html`, `.htm` | ✅ | ❌ | HtmlParser |
+| Plain Text | `.txt` | ❌ | ❌ | GenericTextParser |
+
+### TabularProcessor Features
+
+**Advanced CSV/Excel Processing:**
+- Smart delimiter detection (comma, semicolon, tab, pipe)
+- Robust error handling with multi-stage parsing
+- Large file handling with configurable size limits
+- Data quality analysis and reporting
+- Memory usage optimization
+- Browser crash prevention
+
+**Supported Tabular Formats:**
+- CSV with various delimiters
+- TSV (Tab-Separated Values)
+- Excel files (.xlsx, .xls)
+- Content-based format detection
 
 ## Troubleshooting
 
@@ -170,6 +224,7 @@ If you see "column 'has_ocr_content' is of type integer but expression is of typ
 If your browser crashes when uploading large files with tables (PDF, DOCX, HTML, CSV):
 - This issue has been fixed with universal pagination and response size limits
 - Large table data from ANY document type is automatically truncated in responses
+- Applies to ALL endpoints: sync, async, and status endpoints
 - Use pagination parameters (`?page=1&page_size=100`) to access full data
 - Works for all document types: PDF tables, DOCX tables, HTML tables, CSV data
 - Configure limits in `.env`: `MAX_RESPONSE_ROWS`, `MAX_STORAGE_ROWS`, `MAX_PREVIEW_ROWS`
