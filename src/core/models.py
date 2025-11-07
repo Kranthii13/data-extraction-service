@@ -54,7 +54,7 @@ class ExtractedData(BaseModel):
     author: Optional[str] = None
     page_count: int = 1
     has_ocr_content: bool = False
-    processing_method: Optional[Literal['text_extraction', 'ocr', 'hybrid', 'hybrid_with_ocr', 'html_extraction', 'error']] = None
+    processing_method: Optional[str] = None  # Processing method used (text_extraction, ocr, hybrid, tabular_csv, etc.)
     tables: List[DocumentTable] = []           # Extracted tables
     table_count: int = 0                       # Number of tables found
     # Optional fields that may be populated when retrieved from database
